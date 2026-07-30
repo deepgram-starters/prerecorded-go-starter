@@ -17,6 +17,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -24,7 +25,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -32,6 +32,10 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/joho/godotenv"
+
+	listenrest "github.com/deepgram/deepgram-go-sdk/v3/pkg/api/listen/v1/rest"
+	dginterfaces "github.com/deepgram/deepgram-go-sdk/v3/pkg/client/interfaces"
+	listen "github.com/deepgram/deepgram-go-sdk/v3/pkg/client/listen"
 )
 
 // ============================================================================
@@ -214,89 +218,64 @@ func formatErrorResponse(errMsg string, statusCode int, code string) map[string]
 }
 
 // ============================================================================
-// SECTION 6: DEEPGRAM API CLIENT - Direct HTTP calls to Deepgram REST API
+// SECTION 6: DEEPGRAM API CLIENT - Official Deepgram Go SDK (prerecorded REST)
 // ============================================================================
 
-// buildDeepgramURL constructs the Deepgram /v1/listen URL with query parameters.
-func buildDeepgramURL(params map[string]string) (string, error) {
-	u, err := url.Parse("https://api.deepgram.com/v1/listen")
-	if err != nil {
-		return "", fmt.Errorf("failed to parse API URL: %w", err)
-	}
-	q := u.Query()
+// dgContextFromParams converts the request params into SDK custom query
+// parameters, so every parameter forwarded by the frontend is passed through to
+// Deepgram exactly as before.
+func dgContextFromParams(params map[string]string) context.Context {
+	custom := make(map[string][]string, len(params))
 	for k, v := range params {
 		if v != "" {
-			q.Set(k, v)
+			custom[k] = []string{v}
 		}
 	}
-	u.RawQuery = q.Encode()
-	return u.String(), nil
+	return dginterfaces.WithCustomParameters(context.Background(), custom)
 }
 
-// doDeepgramRequest sends a request to Deepgram and parses the JSON response.
-func doDeepgramRequest(req *http.Request) (map[string]interface{}, error) {
-	req.Header.Set("Authorization", "Token "+apiKey)
+// newListenClient builds a prerecorded (REST) Deepgram client using the loaded
+// API key.
+func newListenClient() *listenrest.Client {
+	c := listen.NewREST(apiKey, &dginterfaces.ClientOptions{})
+	return listenrest.New(c)
+}
 
-	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := client.Do(req)
+// dgResponseToMap marshals the SDK's typed response back into a generic map so
+// the existing formatTranscriptionResponse logic (and the frontend contract) is
+// preserved unchanged.
+func dgResponseToMap(res interface{}) (map[string]interface{}, error) {
+	b, err := json.Marshal(res)
 	if err != nil {
-		return nil, fmt.Errorf("Deepgram API request failed: %w", err)
+		return nil, fmt.Errorf("failed to marshal Deepgram response: %w", err)
 	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Deepgram API returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
+	var m map[string]interface{}
+	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, fmt.Errorf("failed to parse Deepgram response: %w", err)
 	}
-
-	return result, nil
+	return m, nil
 }
 
 // callDeepgramTranscription sends audio bytes to the Deepgram /v1/listen
-// endpoint and returns the parsed JSON response.
+// endpoint via the SDK and returns the parsed JSON response.
 func callDeepgramTranscription(audioData []byte, params map[string]string) (map[string]interface{}, error) {
-	apiURL, err := buildDeepgramURL(params)
+	ctx := dgContextFromParams(params)
+	res, err := newListenClient().FromStream(ctx, bytes.NewReader(audioData), &dginterfaces.PreRecordedTranscriptionOptions{})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Deepgram transcription failed: %w", err)
 	}
-
-	req, err := http.NewRequest("POST", apiURL, bytes.NewReader(audioData))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/octet-stream")
-
-	return doDeepgramRequest(req)
+	return dgResponseToMap(res)
 }
 
-// callDeepgramTranscriptionURL sends a URL to Deepgram for remote transcription.
+// callDeepgramTranscriptionURL sends a URL to Deepgram for remote transcription
+// via the SDK.
 func callDeepgramTranscriptionURL(audioURL string, params map[string]string) (map[string]interface{}, error) {
-	apiURL, err := buildDeepgramURL(params)
+	ctx := dgContextFromParams(params)
+	res, err := newListenClient().FromURL(ctx, audioURL, &dginterfaces.PreRecordedTranscriptionOptions{})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Deepgram transcription failed: %w", err)
 	}
-
-	jsonBody, err := json.Marshal(map[string]string{"url": audioURL})
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal URL body: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", apiURL, bytes.NewReader(jsonBody))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	return doDeepgramRequest(req)
+	return dgResponseToMap(res)
 }
 
 // ============================================================================

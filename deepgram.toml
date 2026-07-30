@@ -6,6 +6,7 @@ repository = "https://github.com/deepgram-starters/go-transcription"
 useCase = "transcription"
 language = "go"
 framework = "go"
+sdk = "deepgram-go-sdk"
 tags = ["speech-to-text", "transcription", "prerecorded", "go"]
 
 [check]
